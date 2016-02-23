@@ -1,6 +1,11 @@
 package dbus
 
-import "testing"
+import (
+	"fmt"
+	"regexp"
+	"strings"
+	"testing"
+)
 
 type lowerCaseExport struct{}
 
@@ -370,5 +375,79 @@ func TestExportSubtreeWithMap_bypassAlias(t *testing.T) {
 	err = object.Call("org.guelfey.DBus.Test.Foo", 0, "qux").Store(&response)
 	if err == nil {
 		t.Error("Expected an error due to calling actual method, not alias")
+	}
+}
+
+// Test that introspection works on sub path of every exported object
+func TestExportSubPathIntrospection(t *testing.T) {
+	const introIntf = "org.freedesktop.DBus.Introspectable"
+	const respTmpl = `^<node>\s*<node\s+name="%s"\s*/>\s*</node>$`
+	const pathstr = "/org/guelfey/DBus/Test/Foo"
+	const intfstr = "org.guelfey.DBus.Test"
+	const intro = `
+	<node>
+	<interface name="` + intfstr + `">
+		<method name="Foo">
+			<arg direction="out" type="s"/>
+		</method>
+	</interface>
+	<interface name="` + introIntf + `">
+		<method name="Introspect">
+			<arg name="out" direction="out" type="s"/>
+		</method>
+	</interface>
+	</node>
+`
+	connection, err := SessionBus()
+	if err != nil {
+		t.Fatalf("Unexpected error connecting to session bus: %s", err)
+	}
+
+	name := connection.Names()[0]
+
+	export := &fooExport{}
+	connection.Export(export, pathstr, intfstr)
+	connection.Export(intro, pathstr, introIntf)
+
+	var response string
+	var match bool
+	path := strings.Split(pathstr, "/")
+	for i := 0; i < len(path)-1; i++ {
+		var subpath string
+		if i == 0 {
+			subpath = "/"
+		} else {
+			subpath = strings.Join(path[:i+1], "/")
+		}
+
+		object := connection.Object(name, ObjectPath(subpath))
+		err = object.Call(introIntf+".Introspect", 0).Store(&response)
+		if err != nil {
+			t.Errorf("Unexpected error calling Introspect on %s: %s", subpath, err)
+		}
+
+		exp := fmt.Sprintf(respTmpl, path[i+1])
+		match, err = regexp.MatchString(exp, response)
+		if err != nil {
+			t.Fatalf("Error calling MatchString: %s", err)
+		}
+		if !match {
+			t.Errorf("Unexpected introspection response for %s: %s", subpath, response)
+		}
+	}
+
+	// Test invalid subpath
+	invalSubpath := "/org/guelfey/DBus/Test/Nonexistent"
+	object := connection.Object(name, ObjectPath(invalSubpath))
+	err = object.Call(introIntf+".Introspect", 0).Store(&response)
+	if err != nil {
+		t.Errorf("Unexpected error calling Introspect on %s: %s", invalSubpath, err)
+	}
+	match, err = regexp.MatchString(`^<node>\s*</node>$`, response)
+	if err != nil {
+		t.Fatalf("Error calling MatchString: %s", err)
+	}
+	if !match {
+		t.Errorf("Unexpected introspection response for %s: %s", invalSubpath, response)
 	}
 }
